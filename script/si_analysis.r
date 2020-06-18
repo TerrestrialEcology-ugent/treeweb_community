@@ -6,7 +6,12 @@
 
 # load libraries
 library(vegan)
-
+library(plyr)
+library(reshape2)
+library(boot)
+library(dplyr)
+library(UpSetR)
+library(DHARMa)
 
 # set working directory
 setwd("~/PostDoc_Ghent/Synthesis_3/treeweb_community/")
@@ -38,20 +43,21 @@ comm_l$herb <- cbind(comm_l$herb[,1], comm_l$herb[,-1] / plot_info$specrich)
 fit_rda <- function(comm, interaction = TRUE, std = TRUE, species = "qrob",...){
   
   print(species)
+  # grab the plot index for the focal tree species
   ids <- eval(as.name(paste0("id_",species)))
-  
+  # if needed standardize
   if(std){
     comm <- decostand(comm, method = "hellinger", MARGIN = 1)
   }
   
   # compute PCNM
-  rs <- rowSums(comm) / sum(comm)
-  pcnmw <- pcnm(dist(plot_xy[,c("X", "Y")]), w = rs)
-  
+  rs <- rowSums(comm) / sum(comm) # the site weights
+  pcnmw <- pcnm(dist(plot_xy[,c("X", "Y")]), w = rs) # PCNM based on plot coordinates
+  # add the PCNM scores to the dataset
   dat <- cbind(plot_info[,c("speccomb", "fragm_std")], scores(pcnmw))
   # NA for opiliones, fix by putting PCNM to 0
   dat[is.na(dat)] <- 0
-  
+  # fit the RDA with or without interaction
   if(interaction){
     rr <- rda(comm[ids,] ~ . + speccomb : fragm_std, dat[ids,], ...)
   } else {
@@ -60,3 +66,377 @@ fit_rda <- function(comm, interaction = TRUE, std = TRUE, species = "qrob",...){
   
   return(rr)
 }
+
+### fit the RDA
+## plot id for the specific tree composition changes
+id_qrob <- which(plot_info$speccomb %in% c("qrob", "fsyl_qrob","qrob_qrub", "all"))
+id_qrub <- which(plot_info$speccomb %in% c("qrub", "fsyl_qrub","qrob_qrub", "all"))
+id_fsyl <- which(plot_info$speccomb %in% c("fsyl", "fsyl_qrob","fsyl_qrub", "all"))
+## the different tree species code
+spp <- c("qrob", "qrub", "fsyl")
+
+# go through the different communities
+# with interaction
+rda_l <- lapply(comm_l, function(comm) sapply(spp, function(sp) fit_rda(comm[,-1], interaction = TRUE, decostand = TRUE, sp), 
+                                              simplify = FALSE))
+### analyze the results
+## first table of effects
+# grab the RDA results for the Table
+## an helper function that grab p-values of the effects and R-square per taxa
+eff_rda <- function(taxa = "bird"){
+  rr <- rda_l[[taxa]]
+  tmp <- ldply(rr, function(x) as.data.frame(anova(x, by = "terms", permutations = how(nperm = 9999))))
+  tmp$terms <- rep(c("composition", "fragmentation", paste0("P", 1:14), "interaction", "residual"), 3)
+  tmp <- filter(tmp, terms %in% c("composition", "fragmentation", "interaction"))
+  tmp$taxa <- taxa
+  
+  # add R2
+  tmp2 <- ldply(rr, function(x) as.data.frame(RsquareAdj(x)$adj.r.squared))
+  tmp2$terms <- "R2"
+  names(tmp2)[2] <- names(tmp)[5]
+  tmp2$taxa <- taxa
+  
+  tmp <- rbind(tmp2, tmp[,c(1,5,6,7)])
+  
+  return(tmp)  
+}
+
+# apply to all taxa
+tabb <- rbind.fill(sapply(comms, function(sp) eff_rda(sp), simplify = FALSE))
+# some data wraggling
+tabb_w <- dcast(tabb, taxa ~ .id + terms, value.var = "Pr(>F)")
+xtable(tabb_w[c(1:3,8, 7,6,4:5,9),c(1,5,2,3,4,9,6,7,8, 13, 10:12)], digits = 3)
+
+## second, effect size of composition / fragmentation effects
+# per tree diversification pathways develop indices of tree composition changes
+change_qrob <- c("qrob -> qrob_fsyl", "qrob -> qrob_qrub",
+                 "qrob_fsyl -> all", "qrob_qrub -> all", "qrob -> all")
+
+change_qrub <- c("qrub -> fsyl_qrub", "qrub -> qrob_qrub",
+                 "fsyl_qrub -> all", "qrob_qrub -> all", "qrub -> all")
+
+change_fsyl <- c("fsyl -> qrob_fsyl", "fsyl -> fsyl_qrub",
+                 "qrob_fsyl -> all", "fsyl_qrub -> all", "fsyl -> all")
+
+# an helper function to get the distance between centroids of different tree composition
+# and also to get the distance of changes due to the fragmentation effect
+# the arguments are:
+# @rr: an object of class rda, the fitted RDA from vegan
+# @tree: a character, the focal tree species, like "qrob"
+get_length_rda <- function(rr, tree){
+  # define the composition changes
+  change_comp <- eval(as.name(paste0("change_", tree)))
+  # define the different composition
+  change_fragm <- c(grep(tree, unique(plot_info$speccomb), value = TRUE), "all")
+  # a new data frame to compute predicted shifts along the gradient of fragmentation
+  newdat <- expand.grid(speccomb = change_fragm, fragm_std = c(-1.69, 2.42),
+                        PCNM1 = 0, PCNM2 = 0, PCNM3 = 0, PCNM4 = 0,
+                        PCNM5 = 0, PCNM6 = 0, PCNM7 = 0, PCNM8 = 0,
+                        PCNM9 = 0, PCNM10 = 0, PCNM11 = 0, PCNM12 = 0,
+                        PCNM13 = 0, PCNM14 = 0)
+  # get the RDA centroid scores
+  sc_cn <- scores(rr, choices = c(1,2), display = "cn", scaling = 0)
+  # depeding on the focal tree compute the shifts in centroids
+  if(tree == "qrob"){
+    c1 <- dist(rbind(sc_cn[3,], sc_cn[2,]))
+    c2 <- dist(rbind(sc_cn[3,], sc_cn[4,]))
+    c3 <- dist(rbind(sc_cn[2,], sc_cn[1,]))
+    c4 <- dist(rbind(sc_cn[4,], sc_cn[1,]))
+    c5 <- dist(rbind(sc_cn[3,], sc_cn[1,]))
+  }
+  if(tree == "qrub"){
+    c1 <- dist(rbind(sc_cn[4,], sc_cn[2,]))
+    c2 <- dist(rbind(sc_cn[4,], sc_cn[3,]))
+    c3 <- dist(rbind(sc_cn[2,], sc_cn[1,]))
+    c4 <- dist(rbind(sc_cn[3,], sc_cn[1,]))
+    c5 <- dist(rbind(sc_cn[4,], sc_cn[1,]))
+  }
+  if(tree == "fsyl"){
+    c1 <- dist(rbind(sc_cn[2,], sc_cn[3,]))
+    c2 <- dist(rbind(sc_cn[2,], sc_cn[4,]))
+    c3 <- dist(rbind(sc_cn[3,], sc_cn[1,]))
+    c4 <- dist(rbind(sc_cn[4,], sc_cn[1,]))
+    c5 <- dist(rbind(sc_cn[2,], sc_cn[1,]))
+  }
+  # compute the shift along the fragmentation gradient
+  sc_fragm <- predict(rr, newdata = newdat, type = "lc")
+  fragm <- c(dist(sc_fragm[c(1, 5),1:2]), 
+             dist(sc_fragm[c(2, 6),1:2]),
+             dist(sc_fragm[c(3, 7),1:2]),
+             dist(sc_fragm[c(4, 8),1:2])) # if we do not restrict the dist to the first two axis we always get the same dist: 0.76
+  
+  data.frame(effect = rep(c("composition", "fragmentation"), times = c(5, 4)), change = c(change_comp, change_fragm), length = c(c1, c2, c3, c4, c5, fragm))
+  
+}
+
+# an helper function to compute the bootstrapped shifts
+# arguments are:
+# @dat: a data.frame or matrix, the community data
+# @id: internal argument for boot
+# @N: an integer, the number of species
+# @tree: a character, the focal tree species like "qrob"
+boot_rda <- function(dat, id, N, tree){
+  # the community data
+  comm <- dat[,1:N]
+  # the predicotrs
+  plot_info <- dat[,(N+1):ncol(dat)]
+  # standardize the community
+  comm <- decostand(comm[,-1], "hellinger", MARGIN = 1)
+  # run the RDA with interaction
+  rr <- rda(comm[id,] ~ speccomb * fragm_std, plot_info[id,])
+  # grab the effect sizes
+  out <- get_length_rda(rr, tree)
+  return(out$length)
+}
+
+# an helper function combining the effect computation with the bootstrapped computation
+# the arguments are:
+# @taxa: a character, the name of the focal taxa like "bird"
+# @tree: a character, the name of the focal tree species like "qrob"
+# @R: an integer, the number of bootstrap samples
+get_length_df <- function(taxa = "bird", tree = "qrob", R = 10){
+  print(taxa) # for debug purposes
+  # grab the relevant RDA
+  rr <- rda_l[[taxa]]
+  # grab the relevant community matrix
+  comm <- comm_l[[taxa]]
+  # grab the plot index for the tree diversification pathways
+  ids <- eval(as.name(paste0("id_", tree)))
+  # the species numer
+  n_sp <- ncol(comm)
+  # put together the community and the predictor data
+  boot_dat <- cbind(comm[ids,], plot_info[ids,])
+  # compute the effect size
+  tab <- get_length_rda(rr[[tree]], tree)
+  # compute the bootstrapped effect size
+  bb <- boot(data = boot_dat, statistic = boot_rda, R = R, N = n_sp, tree = tree, strata = factor(boot_dat$speccomb))
+  # the bootstrapped standard deviation
+  tab$std_err <- apply(bb$t, 2, sd)
+  
+  return(tab)
+}
+
+# run this for all taxa and trees
+c_rob <- rbind.fill(sapply(comms, function(taxa) get_length_df(taxa = taxa, tree = "qrob", R = 10000), simplify = FALSE))
+c_rub <- rbind.fill(sapply(comms, function(taxa) get_length_df(taxa = taxa, tree = "qrub", R = 10000), simplify = FALSE))
+c_syl <- rbind.fill(sapply(comms, function(taxa) get_length_df(taxa = taxa, tree = "fsyl", R = 10000), simplify = FALSE))
+# put everything together
+c_all <- rbind(c_rob, c_rub, c_syl)
+# some re-naming for the plots
+c_all$tree <- rep(c("qrob", "qrub", "fsyl"), each = 81)
+c_all$taxa <- rep(comms, each = 9)
+c_all$taxa[c_all$taxa=="herb"] <- "herbivore"
+c_all$taxa <- factor(c_all$taxa, 
+                     levels = c(comms[1:7], "herbivore", "vegetation"))
+c_all$change <- factor(c_all$change, levels = c(change_qrob[1:2], change_qrub[1:2], change_fsyl[1:2], change_qrob[3:4], change_qrub[3], change_qrob[5], change_qrub[5], change_fsyl[5], "qrob", "fsyl", "qrub", "fsyl_qrob", "fsyl_qrub", "qrob_qrub", "all"))
+
+# first plot on the fragmentation effect
+c_fragm <- subset(c_all, effect == "fragmentation")
+# the position of the bars in the graph
+c_fragm$X <- c(rep(c(3, 2, 1, 4), 9), rep(c(8, 7, 6, 9), 9), rep(c(11, 12, 13, 14), 9))
+
+# compute the average per taxa and div paths
+c_fragm %>%
+  group_by(taxa, tree) %>%
+  summarise(avg = mean(length)) -> avg_eff
+# end of the dotted average line on the graphs
+avg_eff$x_start <- rep(c(10.5, 0.5, 5.5), times = 9)
+avg_eff$x_end <- rep(c(14.5, 4.5, 9.5), times = 9)
+
+# the plot
+gg_f <- ggplot(c_fragm,aes(x=X, y=length, color=tree))+
+  geom_bar(stat = "identity", fill = "white")+
+  geom_linerange(aes(ymin=length, ymax = length + 2 * std_err))+
+  scale_x_continuous(breaks = c(1:4, 6:9, 11:14), labels = c("qrob", "fsyl_qrob", "qrob_qrub", "all", 
+                                                             "qrub", "fsyl_qrub", "qrob_qrub", "all",
+                                                             "fsyl", "fsyl_qrub", "fsyl_qrob", "all")) +
+  facet_wrap(~taxa) +
+  geom_segment(data = avg_eff, aes(x = x_start, xend = x_end, y = avg, yend = avg),
+               size = 1, linetype = "dashed") +
+  labs(x = "Diversification pathway",
+       y = "Strength of fragmentation effect (95% bootstraped CI)",
+       title = "Fragmentation effect across taxa and diversification pathways") +
+  theme(legend.position = "none", axis.text.x = element_text(angle = 90))
+
+ggsave("figures/fragmentation_rda.png", gg_f, width = 22.77,
+       height = 14.71, units = "cm")
+
+# now the compositional change in a similar graph
+c_comp <- subset(c_all, effect == "composition")
+c_comp$X <- c(rep(1:5, 9), rep(7:11, 9), rep(13:17, 9))
+
+gg_c <- ggplot(subset(c_comp, change != "fragmentation"), 
+               aes(x=X, y=length, group = paste0(change, tree), color = tree)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9), fill = "white")+
+  geom_linerange(aes(ymin=length, ymax = length + 2* std_err), position = position_dodge(width = 0.9))+
+  facet_wrap(~taxa) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.9), 
+        legend.position = "none") +
+  scale_x_continuous(breaks= c(1:5, 7:11, 13:17), labels = subset(c_comp, taxa == "bird")$change) +
+  labs(x = "Diversification pathway",
+       y = "Strength of diversification effect (95% bootstraped CI)")
+
+ggsave("figures/composition_rda.png", gg_c, width = 22.77,
+       height = 14.71, units = "cm")
+
+########### Part 2: compositional turnover across groups, using upset graphs #####
+
+# an helper function formatting the comminty data and outputting the desired plots
+upset_comm <- function(comm){
+  
+  if(names(comm)[1] != "id_plot"){
+    names(comm)[1]<- "id_plot"
+  }
+  
+  #format the community
+  comm %>%
+    pivot_longer(cols = 2:ncol(comm), names_to = "species", values_to = "abundance") %>%
+    #rename(id_plot = plot) %>%
+    left_join(plot_info, by = "id_plot") %>%
+    group_by(speccomb, species) %>%
+    summarise(Present = sum(abundance, na.rm = TRUE)) %>%
+    mutate(Present = ifelse(Present > 0, 1, 0)) %>%
+    pivot_wider(names_from = speccomb, values_from = Present) -> comm_dd
+  
+  comm_dd <- as.data.frame(comm_dd)
+  # one plot per diversification pathways
+  u_rob <- upset(comm_dd, sets = c("qrob", "fsyl_qrob", "qrob_qrub", "all"), order.by = "freq",
+                 mainbar.y.label = "Number of (shared) species", sets.x.label = "Total species\nnumber",
+                 main.bar.color="#1b9e77", matrix.color="#1b9e77",
+                 sets.bar.color="#d95f02")
+  
+  
+  u_robc <- cowplot::plot_grid(NULL, u_rob$Main_bar, u_rob$Sizes, u_rob$Matrix,
+                               nrow=2, align='hv', rel_heights = c(3,1),
+                               rel_widths = c(2,3))
+  
+  u_rub <- upset(comm_dd, sets = c("qrub", "fsyl_qrub", "qrob_qrub", "all"), order.by = "freq",
+                 mainbar.y.label = "Number of (shared) species", sets.x.label = "Total species\nnumber",
+                 main.bar.color="#1b9e77", matrix.color="#1b9e77",
+                 sets.bar.color="#d95f02")
+  
+  
+  u_rubc <- cowplot::plot_grid(NULL, u_rub$Main_bar, u_rub$Sizes, u_rub$Matrix,
+                               nrow=2, align='hv', rel_heights = c(3,1),
+                               rel_widths = c(2,3))
+  
+  u_syl <- upset(comm_dd, sets = c("fsyl", "fsyl_qrub", "fsyl_qrob", "all"), order.by = "freq",
+                 mainbar.y.label = "Number of (shared) species", sets.x.label = "Total species\nnumber",
+                 main.bar.color="#1b9e77", matrix.color="#1b9e77",
+                 sets.bar.color="#d95f02")
+  
+  
+  u_sylc <- cowplot::plot_grid(NULL, u_syl$Main_bar, u_syl$Sizes, u_syl$Matrix,
+                               nrow=2, align='hv', rel_heights = c(3,1),
+                               rel_widths = c(2,3))
+  
+  
+  gga <- grid.arrange(u_robc, u_rubc, u_sylc, ncol = 3)
+  
+  
+  return(gga)
+}
+
+# run this for all taxa
+ggsave("figures/upset_bird.png", upset_comm(comm_l$bird), width = 11, height = 5, units = "in")
+ggsave("figures/upset_bat.png", upset_comm(comm_l$bat), width = 11, height = 5, units = "in")
+ggsave("figures/upset_carabid.png", upset_comm(comm_l$carabid), width = 11, height = 5, units = "in")
+ggsave("figures/upset_spider.png", upset_comm(comm_l$spider), width = 11, height = 5, units = "in")
+ggsave("figures/upset_isopod.png", upset_comm(comm_l$isopods), width = 11, height = 5, units = "in")
+ggsave("figures/upset_diplopod.png", upset_comm(comm_l$diplopod), width = 11, height = 5, units = "in")
+ggsave("figures/upset_herbivore.png", upset_comm(comm_l$herb), width = 11, height = 5, units = "in")
+ggsave("figures/upset_vegetation.png", upset_comm(comm_l$vegetation), width = 11, height = 5, units = "in")
+ggsave("figures/upset_opiliones.png", upset_comm(comm_l$opiliones), width = 11, height = 5, units = "in")
+
+
+########### Part 3: testing additional community webs ########
+
+# an helper function to run the mcoa
+# the arguments are:
+# @web: a character, the web of interaction to quantify like "bird_bat_spider"
+# @nf: an integer, the number of axis to keep
+# @option: a character, the weighing used, see ?mcoa for the different options
+# @std: a logical, whether to hellinger-standardize the data
+mcoa_run <- function(web, nf = 2, option = "inertia", std = TRUE){
+  comm_name <- strsplit(web, "_")[[1]]
+  
+  comms <- lapply(comm_name, function(x) comm_l[[x]])
+  
+  if(std){
+    comms <- lapply(comms, function(comm) decostand(comm[,-1], "hellinger"))
+  }
+  
+  # grab number of columns
+  nb_col <- sapply(comms, function(x) ncol(x))
+  
+  # put all together
+  comms_all <- do.call(cbind, comms)
+  # create ktab object
+  kt <- ktab.data.frame(comms_all, nb_col,
+                        tabnames = comm_name)
+  
+  # run mcoa
+  m <- mcoa(kt, option = option, nf = nf, scannf = FALSE)
+  
+  return(m)
+}
+
+##full web of interaction: all groups:
+web_2 <- "bird_bat_spider_opiliones_carabid_isopods_diplopod_herb_vegetation"
+n_taxa <- 9
+m_2 <- mcoa_run(web_2)
+
+## compute the distance of each group from the plot synthetic scores
+plot_info$x <- plot_xy$X
+plot_info$y <- plot_xy$Y
+vhb_xy <- m_2$Tl1
+vhb_xy$id_plot <- rep(1:53, n_taxa)
+vhb_xy$ref_x <- m_2$SynVar[rep(1:53, n_taxa),1]
+vhb_xy$ref_y <- m_2$SynVar[rep(1:53, n_taxa),2]
+vhb_xy$d <- with(vhb_xy, sqrt((Axis1-ref_x) ** 2 + (Axis2-ref_y) ** 2))
+vhb_xy %>%
+  group_by(id_plot) %>%
+  summarise(d = sum(d)) %>%
+  left_join(plot_info[,c(1,13,14,15, 16, 17)], by = "id_plot") -> vhb_dd
+
+# fit a glm to this
+m_vhb <- glm(d ~ fragm_std * speccomb, vhb_dd, family = Gamma(link="log"), contrasts = list(speccomb = "contr.sum"))
+
+## look at residuals
+ss <- simulateResiduals(m_vhb)
+plot(ss) # good
+testSpatialAutocorrelation(ss, x = plot_info$x, y = plot_info$y) # no spatial autocorrelation
+
+## anova
+anova(m_vhb, test = "Chisq") # species composition effect
+
+## now only vegetation - bird - carabid - spider
+web_3 <- "bird_carabid_spider_vegetation"
+n_taxa <- 4
+m_3 <- mcoa_run(web_3)
+
+## compute the distance of each group from the plot synthetic scores
+plot_info$x <- plot_xy$X
+plot_info$y <- plot_xy$Y
+vhb_xy <- m_3$Tl1
+vhb_xy$id_plot <- rep(1:53, n_taxa)
+vhb_xy$ref_x <- m_3$SynVar[rep(1:53, n_taxa),1]
+vhb_xy$ref_y <- m_3$SynVar[rep(1:53, n_taxa),2]
+vhb_xy$d <- with(vhb_xy, sqrt((Axis1-ref_x) ** 2 + (Axis2-ref_y) ** 2))
+vhb_xy %>%
+  group_by(id_plot) %>%
+  summarise(d = sum(d)) %>%
+  left_join(plot_info[,c(1,13,14,15, 16, 17)], by = "id_plot") -> vhb_dd
+
+# fit a glm to this
+m_vhb <- glm(d ~ fragm_std * speccomb, vhb_dd, family = Gamma(link="log"), contrasts = list(speccomb = "contr.sum"))
+
+## look at residuals
+ss <- simulateResiduals(m_vhb)
+plot(ss) # good
+testSpatialAutocorrelation(ss, x = plot_info$x, y = plot_info$y) # no spatial autocorrelation
+
+## anova
+anova(m_vhb, test = "Chisq") # species composition effect
+
+

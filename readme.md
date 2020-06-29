@@ -1,5 +1,7 @@
 # Treeweb cross-community manuscript
 
+[![DOI](https://zenodo.org/badge/272743468.svg)](https://zenodo.org/badge/latestdoi/272743468)
+
 Online repository for the developping manuscript led by M. Perring on across community responses in the Treeweb plots
 
 ## Repository structure

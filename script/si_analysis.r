@@ -12,6 +12,9 @@ library(boot)
 library(dplyr)
 library(UpSetR)
 library(DHARMa)
+library(ade4)
+library(ggplot2)
+library(gridExtra)
 
 # set working directory
 setwd("~/PostDoc_Ghent/Synthesis_3/treeweb_community/")
@@ -36,17 +39,17 @@ comm_l$herb <- cbind(comm_l$herb[,1], comm_l$herb[,-1] / plot_info$specrich)
 # arguments are:
 # @comm: a character, the name of the taxa
 # @interaction: a logical, whether the include an interaction term between species composition and fragmentation
-# @std: a logical, whether to hellinger-standardize the community data
+# @decostand: a logical, whether to hellinger-standardize the community data
 # @species: a character, the tree species in focus
 # @...: further argument to pass to the RDA, see ?rda
 
-fit_rda <- function(comm, interaction = TRUE, std = TRUE, species = "qrob",...){
+fit_rda <- function(comm, interaction = TRUE, decostand = TRUE, species = "qrob",...){
   
   print(species)
   # grab the plot index for the focal tree species
   ids <- eval(as.name(paste0("id_",species)))
   # if needed standardize
-  if(std){
+  if(decostand){
     comm <- decostand(comm, method = "hellinger", MARGIN = 1)
   }
   
@@ -77,7 +80,7 @@ spp <- c("qrob", "qrub", "fsyl")
 
 # go through the different communities
 # with interaction
-rda_l <- lapply(comm_l, function(comm) sapply(spp, function(sp) fit_rda(comm[,-1], interaction = TRUE, decostand = TRUE, sp), 
+rda_l <- lapply(comm_l, function(comm) sapply(spp, function(sp) fit_rda(comm[,-1], interaction = TRUE, decostand = TRUE, species = sp), 
                                               simplify = FALSE))
 ### analyze the results
 ## first table of effects
@@ -243,6 +246,12 @@ c_fragm %>%
 avg_eff$x_start <- rep(c(10.5, 0.5, 5.5), times = 9)
 avg_eff$x_end <- rep(c(14.5, 4.5, 9.5), times = 9)
 
+# nicer name for the facets
+facet_n <- c("bird" = "birds", "bat" = "bats", "spider" = "spiders",
+                "opiliones" = "harvestmen", "carabid" = "carabids",
+                "isopods" = "woodlice", "diplopod" = "millipedes",
+                "herbivore" = "herbivores", "vegetation" = "vegetation")
+
 # the plot
 gg_f <- ggplot(c_fragm,aes(x=X, y=length, color=tree))+
   geom_bar(stat = "identity", fill = "white")+
@@ -250,12 +259,12 @@ gg_f <- ggplot(c_fragm,aes(x=X, y=length, color=tree))+
   scale_x_continuous(breaks = c(1:4, 6:9, 11:14), labels = c("qrob", "fsyl_qrob", "qrob_qrub", "all", 
                                                              "qrub", "fsyl_qrub", "qrob_qrub", "all",
                                                              "fsyl", "fsyl_qrub", "fsyl_qrob", "all")) +
-  facet_wrap(~taxa) +
+  facet_wrap(~taxa, labeller = as_labeller(facet_n)) +
   geom_segment(data = avg_eff, aes(x = x_start, xend = x_end, y = avg, yend = avg),
                size = 1, linetype = "dashed") +
   labs(x = "Diversification pathway",
-       y = "Strength of fragmentation effect (95% bootstraped CI)",
-       title = "Fragmentation effect across taxa and diversification pathways") +
+       y = "Strength of fragmentation effect (95% bootstraped CI)"
+       ) +
   theme(legend.position = "none", axis.text.x = element_text(angle = 90))
 
 ggsave("figures/fragmentation_rda.png", gg_f, width = 22.77,
@@ -269,7 +278,7 @@ gg_c <- ggplot(subset(c_comp, change != "fragmentation"),
                aes(x=X, y=length, group = paste0(change, tree), color = tree)) +
   geom_bar(stat = "identity", position = position_dodge(width = 0.9), fill = "white")+
   geom_linerange(aes(ymin=length, ymax = length + 2* std_err), position = position_dodge(width = 0.9))+
-  facet_wrap(~taxa) + 
+  facet_wrap(~taxa, labeller = as_labeller(facet_n)) + 
   theme(axis.text.x = element_text(angle = 45, hjust = 0.9), 
         legend.position = "none") +
   scale_x_continuous(breaks= c(1:5, 7:11, 13:17), labels = subset(c_comp, taxa == "bird")$change) +
@@ -410,6 +419,55 @@ testSpatialAutocorrelation(ss, x = plot_info$x, y = plot_info$y) # no spatial au
 ## anova
 anova(m_vhb, test = "Chisq") # species composition effect
 
+## make plot of predicted distance for the different tree composition
+### a new data frame to derive the model predictions
+newdat <- expand.grid(speccomb = unique(plot_info$speccomb), fragm_std = 0)
+
+# augment per diversification path
+newdat2 <- newdat[c(2, 5, 3, 4, 7, 5, 1, 4, 6, 3, 1, 4),]
+newdat2$tree <- rep(c("fsyl", "qrob", "qrub"), each = 4)
+# compute the model predictions
+newdat2$pred <- predict(m_vhb, newdata = newdat2, type = "response")
+newdat2$se <- predict(m_vhb, newdata = newdat2, type = "response", se.fit = TRUE)$se.fit
+
+# some refinments for ordering the species somposition as we want them
+newdat2$speccomb <- factor(newdat2$speccomb, levels = c("fsyl","qrob","qrub","fsyl_qrob","fsyl_qrub","qrob_qrub","all"))
+vhb_dd$speccomb <- factor(vhb_dd$speccomb, levels = c("fsyl","qrob","qrub","fsyl_qrob","fsyl_qrub","qrob_qrub","all"))
+
+# the plots
+gg_syl <- ggplot(subset(vhb_dd, speccomb %in% c("fsyl", "fsyl_qrob", "fsyl_qrub", "all"))) +
+  geom_jitter(aes(x=speccomb, y = d), width = 0.1) +
+  geom_point(data=subset(newdat2, tree == "fsyl"), aes(x=speccomb, y=pred), color="red", size = 2.5) +
+  geom_linerange(data = subset(newdat2, tree == "fsyl"), aes(x=speccomb, ymin = pred-2*se, ymax=pred+2*se), color="red") +
+  geom_hline(yintercept = exp(coef(m_vhb)[1]), linetype = "dashed", color = "red") +
+  scale_x_discrete(labels = c("beech", "beech +\nped. oak", "beech +\nred oak", "all")) +
+  labs(x = "", y = "", title = "(a)") +
+  ylim(c(3.8, 10.1))
+
+gg_rob <- ggplot(subset(vhb_dd, speccomb %in% c("qrob", "fsyl_qrob", "qrob_qrub", "all"))) +
+  geom_jitter(aes(x=speccomb, y = d), width = 0.1) +
+  geom_point(data=subset(newdat2, tree == "qrob"), aes(x=speccomb, y=pred), color="red", size = 2.5) +
+  geom_linerange(data = subset(newdat2, tree == "qrob"), aes(x=speccomb, ymin = pred-2*se, ymax=pred+2*se), color="red") +
+  geom_hline(yintercept = exp(coef(m_vhb)[1]), linetype = "dashed", color = "red") +
+  scale_x_discrete(labels = c("ped. oak", "beech +\nped. oak", "ped. oak +\nred oak", "all")) +
+  labs(x = "", y = "", title = "(b)") +
+  ylim(c(3.8, 10.1))
+
+gg_rub <- ggplot(subset(vhb_dd, speccomb %in% c("qrub", "fsyl_qrub", "qrob_qrub", "all"))) +
+  geom_jitter(aes(x=speccomb, y = d), width = 0.1) +
+  geom_point(data=subset(newdat2, tree == "qrub"), aes(x=speccomb, y=pred), color="red", size = 2.5) +
+  geom_linerange(data = subset(newdat2, tree == "qrub"), aes(x=speccomb, ymin = pred-2*se, ymax=pred+2*se), color="red") +
+  geom_hline(yintercept = exp(coef(m_vhb)[1]), linetype = "dashed", color = "red") +
+  labs(x = "", y = "", title = "(c)") +
+  scale_x_discrete(labels = c("red oak", "beech +\nred oak", "ped. oak +\nred oak", "all")) +
+  ylim(c(3.8, 10.1))
+
+
+gg_all <- grid.arrange(gg_syl, gg_rob, gg_rub, nrow = 3, bottom = "Tree species composition", left = "Community distance")
+
+ggsave("figures/mcoa_composition_web2.png", gg_all, width = 4, height = 8)
+
+
 ## now only vegetation - bird - carabid - spider
 web_3 <- "bird_carabid_spider_vegetation"
 n_taxa <- 4
@@ -439,4 +497,51 @@ testSpatialAutocorrelation(ss, x = plot_info$x, y = plot_info$y) # no spatial au
 ## anova
 anova(m_vhb, test = "Chisq") # species composition effect
 
+## make plot of predicted distance for the different tree composition
+### a new data frame to derive the model predictions
+newdat <- expand.grid(speccomb = unique(plot_info$speccomb), fragm_std = 0)
+
+# augment per diversification path
+newdat2 <- newdat[c(2, 5, 3, 4, 7, 5, 1, 4, 6, 3, 1, 4),]
+newdat2$tree <- rep(c("fsyl", "qrob", "qrub"), each = 4)
+# compute the model predictions
+newdat2$pred <- predict(m_vhb, newdata = newdat2, type = "response")
+newdat2$se <- predict(m_vhb, newdata = newdat2, type = "response", se.fit = TRUE)$se.fit
+
+# some refinments for ordering the species somposition as we want them
+newdat2$speccomb <- factor(newdat2$speccomb, levels = c("fsyl","qrob","qrub","fsyl_qrob","fsyl_qrub","qrob_qrub","all"))
+vhb_dd$speccomb <- factor(vhb_dd$speccomb, levels = c("fsyl","qrob","qrub","fsyl_qrob","fsyl_qrub","qrob_qrub","all"))
+
+# the plots
+gg_syl <- ggplot(subset(vhb_dd, speccomb %in% c("fsyl", "fsyl_qrob", "fsyl_qrub", "all"))) +
+  geom_jitter(aes(x=speccomb, y = d), width = 0.1) +
+  geom_point(data=subset(newdat2, tree == "fsyl"), aes(x=speccomb, y=pred), color="red", size = 2.5) +
+  geom_linerange(data = subset(newdat2, tree == "fsyl"), aes(x=speccomb, ymin = pred-2*se, ymax=pred+2*se), color="red") +
+  geom_hline(yintercept = exp(coef(m_vhb)[1]), linetype = "dashed", color = "red") +
+  scale_x_discrete(labels = c("beech", "beech +\nped. oak", "beech +\nred oak", "all")) +
+  labs(x = "", y = "", title = "(a)") +
+  ylim(c(0.5, 5.2))
+
+gg_rob <- ggplot(subset(vhb_dd, speccomb %in% c("qrob", "fsyl_qrob", "qrob_qrub", "all"))) +
+  geom_jitter(aes(x=speccomb, y = d), width = 0.1) +
+  geom_point(data=subset(newdat2, tree == "qrob"), aes(x=speccomb, y=pred), color="red", size = 2.5) +
+  geom_linerange(data = subset(newdat2, tree == "qrob"), aes(x=speccomb, ymin = pred-2*se, ymax=pred+2*se), color="red") +
+  geom_hline(yintercept = exp(coef(m_vhb)[1]), linetype = "dashed", color = "red") +
+  scale_x_discrete(labels = c("ped. oak", "beech +\nped. oak", "ped. oak +\nred oak", "all")) +
+  labs(x = "", y = "", title = "(b)") +
+  ylim(c(0.5, 5.2))
+
+gg_rub <- ggplot(subset(vhb_dd, speccomb %in% c("qrub", "fsyl_qrub", "qrob_qrub", "all"))) +
+  geom_jitter(aes(x=speccomb, y = d), width = 0.1) +
+  geom_point(data=subset(newdat2, tree == "qrub"), aes(x=speccomb, y=pred), color="red", size = 2.5) +
+  geom_linerange(data = subset(newdat2, tree == "qrub"), aes(x=speccomb, ymin = pred-2*se, ymax=pred+2*se), color="red") +
+  geom_hline(yintercept = exp(coef(m_vhb)[1]), linetype = "dashed", color = "red") +
+  labs(x = "", y = "", title = "(c)") +
+  scale_x_discrete(labels = c("red oak", "beech +\nred oak", "ped. oak +\nred oak", "all")) +
+  ylim(c(0.5, 5.2))
+
+
+gg_all <- grid.arrange(gg_syl, gg_rob, gg_rub, nrow = 3, bottom = "Tree species composition", left = "Community distance")
+
+ggsave("figures/mcoa_composition_web3.png", gg_all, width = 4, height = 8)
 

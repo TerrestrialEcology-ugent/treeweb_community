@@ -306,4 +306,85 @@ gg_all <- grid.arrange(gg_syl, gg_rob, gg_rub, nrow = 3, bottom = "Tree species 
 
 ggsave("figures/mcoa_composition_2.png", gg_all, width = 4, height = 8)
 
+# supporting information graph displaying
+# the distance of all taxa from the plot centroid scores
+# this will be done separately for all diversification pathways
+
+## for fsyl paths
+vhb_syl <- subset(vhb_xy, id_plot %in% id_fsyl)
+vhb_syl <- arrange(vhb_syl, id_plot)
+
+vhb_syl <- merge(vhb_syl, plot_info, by = "id_plot")
+vhb_syl$speccomb <- factor(vhb_syl$speccomb, levels = c("fsyl", "fsyl_qrob", "fsyl_qrub", "all"))
+
+
+gg_syl <- ggplot(vhb_syl, aes(x=ref_x, y=ref_y, group=id_plot, color = fragm_std)) +
+  geom_point(aes(x = Axis1, y = Axis2), size = 0.5) +
+  geom_segment(aes(xend=Axis1, yend=Axis2)) +
+  geom_point() +
+  facet_wrap(~ speccomb, ncol = 4) +
+  scale_color_viridis(name = "Fragm.\nintensity", option = "C", 
+                      limits = c(-1.7, 2.45)) +
+  labs(x="", y = "", title = "(a)") +
+  xlim(c(-1.4, 0.5)) +
+  ylim(c(-2.3,2.5))
+
+## now for qrob
+vhb_rob <- subset(vhb_xy, id_plot %in% id_qrob)
+vhb_rob <- arrange(vhb_rob, id_plot)
+
+vhb_rob <- merge(vhb_rob, plot_info, by = "id_plot")
+vhb_rob$speccomb <- factor(vhb_rob$speccomb, levels = c("qrob", "fsyl_qrob", "qrob_qrub", "all"))
+
+
+gg_rob <- ggplot(vhb_rob, aes(x=ref_x, y=ref_y, group=id_plot, color = fragm_std)) +
+  geom_point(aes(x = Axis1, y = Axis2), size = 0.5) +
+  geom_segment(aes(xend=Axis1, yend=Axis2)) +
+  geom_point() +
+  facet_wrap(~ speccomb, ncol = 4) +
+  scale_color_viridis(name = "Fragm.\nintensity", option = "C",
+                      limits = c(-1.7, 2.45)) +
+  labs(x="", y = "", title = "(b)")  +
+  xlim(c(-1.4, 0.5)) +
+  ylim(c(-2.3,2.5))
+
+## now for qrub
+vhb_rub <- subset(vhb_xy, id_plot %in% id_qrub)
+vhb_rub <- arrange(vhb_rub, id_plot)
+
+vhb_rub <- merge(vhb_rub, plot_info, by = "id_plot")
+vhb_rub$speccomb <- factor(vhb_rub$speccomb, levels = c("qrub", "fsyl_qrub", "qrob_qrub", "all"))
+
+
+gg_rub <- ggplot(vhb_rub, aes(x=ref_x, y=ref_y, group=id_plot, color = fragm_std)) +
+  geom_point(aes(x = Axis1, y = Axis2), size = 0.5) +
+  geom_segment(aes(xend=Axis1, yend=Axis2)) +
+  geom_point() +
+  facet_wrap(~ speccomb, ncol = 4) +
+  scale_color_viridis(name = "Fragm.\nintensity", option = "C",
+                      limits = c(-1.7, 2.45)) +
+  labs(x="", y = "", title = "(c)")  +
+  xlim(c(-1.4, 0.5)) +
+  ylim(c(-2.3,2.5))
+
+# tweaking to get common legend
+g_legend<-function(a.gplot){
+  tmp <- ggplot_gtable(ggplot_build(a.gplot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)}
+
+mylegend<-g_legend(gg_rob)
+
+# the plot
+gg_all <- grid.arrange(arrangeGrob(gg_syl + theme(legend.position = "none"),
+                                   gg_rob + theme(legend.position = "none"),
+                                   gg_rub + theme(legend.position = "none"), nrow = 3),
+                       mylegend, ncol = 2, widths = c(9, 2),
+                       bottom = "MCOA axis 1", left = "MCOA axis 2")
+
+ggsave("figures/mcoa_plot.png", gg_all, width = 8, height = 8)
+
+
+
 ########## end of the main script ############

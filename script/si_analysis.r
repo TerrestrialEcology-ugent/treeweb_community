@@ -20,7 +20,7 @@ library(gridExtra)
 setwd("~/PostDoc_Ghent/Synthesis_3/treeweb_community/")
 
 # load plot data
-plot_info <- read.csv("data/synthesis_expldata_raw.csv", sep = " ", stringsAsFactors = FALSE)
+plot_info <- read.csv("data/synthesis_expldata_raw.csv", stringsAsFactors = FALSE)
 plot_xy <- read.csv("data/plot_xy.csv")
 
 # load community data
@@ -32,8 +32,10 @@ names(comm_l) <- comms
 comm_l$bird <- comm_l$bird[,-which(colSums(comm_l$bird) == 0)]
 # divide herbivore by sampling effort
 comm_l$herb <- cbind(comm_l$herb[,1], comm_l$herb[,-1] / plot_info$specrich)
+# remove genus level id in isopods
+comm_l$isopods <- comm_l$isopods[,-ncol(comm_l$isopods)]
 
-########### Part 1: RDA per trophic group
+########### Part 1: RDA per trophic group ###########
 
 # an helper function to run the RDA
 # arguments are:
@@ -544,4 +546,259 @@ gg_rub <- ggplot(subset(vhb_dd, speccomb %in% c("qrub", "fsyl_qrub", "qrob_qrub"
 gg_all <- grid.arrange(gg_syl, gg_rob, gg_rub, nrow = 3, bottom = "Tree species composition", left = "Community distance")
 
 ggsave("figures/mcoa_composition_web3.png", gg_all, width = 4, height = 8)
+
+##### Part 4: Co-inertia analysis with new groupings ######
+
+# define 5 groups, herbivores, primary producers, predators, detritivores and omnivores
+comm_l$primary <- comm_l$vegetation
+comm_l$herbivore <- comm_l$herb
+comm_l$detritivore <- cbind(comm_l$isopods, comm_l$diplopod[,-1])
+comm_l$omnivore <- cbind(comm_l$carabid, comm_l$opiliones[,-1], comm_l$bird[,-1])
+comm_l$predator <- cbind(comm_l$bat, comm_l$spider[,-1])
+
+# all potential pairs of communities
+comms2 <- c("primary", "herbivore", "detritivore", "omnivore", "predator")
+pairs2 <- outer(comms2, comms2, paste, sep = "_")
+pairs_u2 <- pairs2[upper.tri(pairs2)]
+
+# define the trophic levels
+tl2 <- data.frame(taxa = comms2,
+                 tl = c(1, 2, 2, 3, 4))
+
+# put all pairs in a data frame together with their trophic distance
+pairs_d2 <- data.frame(pairs = pairs_u2, stringsAsFactors = FALSE)
+pairs_d2 <- separate(pairs_d2, "pairs", c("from", "to"), sep = "_", remove = FALSE)
+
+pairs_d2 <- merge(pairs_d2, tl2, by.x = "from", by.y = "taxa", sort = FALSE)
+pairs_d2 <- merge(pairs_d2, tl2, by.x = "to", by.y = "taxa", sort=FALSE)
+pairs_d2$dist <- with(pairs_d2, sqrt((tl.x - tl.y)**2))
+
+
+## get percent explained variation of the first two axis in the coinertia
+tt2 <- sapply(pairs_u2, function(x) get_percent_explained(x))
+
+# RV value between each comms
+rv_all2 <- sapply(pairs_u2, function(x) get_coia_rv(x, nrepet = 9999), simplify = FALSE) # this can take time to run depending on the number of repetitions
+# some data wraggling to put te results in a plotable format
+rv_all2 <- rbind.fill(rv_all2)
+rv_all2$pair <- pairs_u2
+rv_all2 <- merge(rv_all2, pairs_d2, by.x = "pair", by.y = "pairs")
+rv_all2 <- arrange(rv_all2, dist, pair)
+
+# plot
+rv_all2 <- unite(rv_all2, "pair", c(to, from), sep =":")
+rv_all2$pair <- factor(rv_all2$pair)
+rv_all2$x <- 1:10
+
+# the plot (figure X in the manuscript)
+gg_rv2 <- ggplot(rv_all2, aes(x=x, y=rv, fill=col)) +
+  geom_bar(stat = "identity", width = 0.75) +
+  scale_fill_brewer(type = "qual",palette = "Set1",
+                    labels = c("no sig. relation", "sig. relation"),
+                    name = "RV permutation\ntest:") +
+  scale_x_continuous(breaks = 1:10, labels = rv_all2$pair, expand = c(0, 0)) +
+  scale_y_continuous(limits = c(0, 0.6), expand = c(0, 0)) +
+  coord_flip() +
+  theme(axis.text.x = element_text(hjust = 0),
+        axis.text.y = element_text(vjust = 0.25)) +
+  labs(x = "Pairwise community comparison",
+       y = "RV value") +
+  theme_bw()
+
+ggsave("figures/coin_rv_feeding.png", gg_rv2)
+
+
+# multiple COIA
+
+## first web of interaction: all groups except for the bats:
+web_1 <- "primary_herbivore_detritivore_omnivore_predator"
+m_1 <- mcoa_run(web_1)
+
+## compute the distance of each group from the plot synthetic scores
+plot_info$x <- plot_xy$X
+plot_info$y <- plot_xy$Y
+vhb_xy <- m_1$Tl1
+vhb_xy$id_plot <- rep(1:53, length(web_1))
+vhb_xy$ref_x <- m_1$SynVar[rep(1:53, length(web_1)),1]
+vhb_xy$ref_y <- m_1$SynVar[rep(1:53, length(web_1)),2]
+vhb_xy$d <- with(vhb_xy, sqrt((Axis1-ref_x) ** 2 + (Axis2-ref_y) ** 2))
+vhb_xy %>%
+  group_by(id_plot) %>%
+  summarise(d = sum(d)) %>%
+  left_join(plot_info[,c(1,13,14,15, 16, 17)], by = "id_plot") -> vhb_dd
+
+# fit a glm to this
+m_vhb <- glm(d ~ fragm_std * speccomb, vhb_dd, family = Gamma(link="log"), contrasts = list(speccomb = "contr.sum"))
+
+## look at residuals
+ss <- simulateResiduals(m_vhb)
+plot(ss) # good
+testSpatialAutocorrelation(ss, x = plot_info$x, y = plot_info$y) # no spatial autocorrelation
+
+## anova
+anova(m_vhb, test = "Chisq")
+## the plot of composition effects
+newdat <- expand.grid(speccomb = unique(plot_info$speccomb), fragm_std = 0)
+
+# augment per diversification path
+newdat2 <- newdat[c(2, 5, 3, 4, 7, 5, 1, 4, 6, 3, 1, 4),]
+newdat2$tree <- rep(c("fsyl", "qrob", "qrub"), each = 4)
+# compute the model predictions
+newdat2$pred <- predict(m_vhb, newdata = newdat2, type = "response")
+newdat2$se <- predict(m_vhb, newdata = newdat2, type = "response", se.fit = TRUE)$se.fit
+
+# some refinments for ordering the species somposition as we want them
+newdat2$speccomb <- factor(newdat2$speccomb, levels = c("fsyl","qrob","qrub","fsyl_qrob","fsyl_qrub","qrob_qrub","all"))
+vhb_dd$speccomb <- factor(vhb_dd$speccomb, levels = c("fsyl","qrob","qrub","fsyl_qrob","fsyl_qrub","qrob_qrub","all"))
+
+# the plots
+gg_syl <- ggplot(subset(vhb_dd, speccomb %in% c("fsyl", "fsyl_qrob", "fsyl_qrub", "all"))) +
+  geom_jitter(aes(x=speccomb, y = d), width = 0.1) +
+  geom_point(data=subset(newdat2, tree == "fsyl"), aes(x=speccomb, y=pred), color="red", size = 2.5) +
+  geom_linerange(data = subset(newdat2, tree == "fsyl"), aes(x=speccomb, ymin = pred-2*se, ymax=pred+2*se), color="red") +
+  geom_hline(yintercept = exp(coef(m_vhb)[1]), linetype = "dashed", color = "red") +
+  scale_x_discrete(labels = c("beech", "beech +\nped. oak", "beech +\nred oak", "all")) +
+  labs(x = "", y = "", title = "(a)") +
+  ylim(c(1.6, 6.2))
+
+gg_rob <- ggplot(subset(vhb_dd, speccomb %in% c("qrob", "fsyl_qrob", "qrob_qrub", "all"))) +
+  geom_jitter(aes(x=speccomb, y = d), width = 0.1) +
+  geom_point(data=subset(newdat2, tree == "qrob"), aes(x=speccomb, y=pred), color="red", size = 2.5) +
+  geom_linerange(data = subset(newdat2, tree == "qrob"), aes(x=speccomb, ymin = pred-2*se, ymax=pred+2*se), color="red") +
+  geom_hline(yintercept = exp(coef(m_vhb)[1]), linetype = "dashed", color = "red") +
+  scale_x_discrete(labels = c("ped. oak", "beech +\nped. oak", "ped. oak +\nred oak", "all")) +
+  labs(x = "", y = "", title = "(b)") +
+  ylim(c(1.6, 6.2))
+
+gg_rub <- ggplot(subset(vhb_dd, speccomb %in% c("qrub", "fsyl_qrub", "qrob_qrub", "all"))) +
+  geom_jitter(aes(x=speccomb, y = d), width = 0.1) +
+  geom_point(data=subset(newdat2, tree == "qrub"), aes(x=speccomb, y=pred), color="red", size = 2.5) +
+  geom_linerange(data = subset(newdat2, tree == "qrub"), aes(x=speccomb, ymin = pred-2*se, ymax=pred+2*se), color="red") +
+  geom_hline(yintercept = exp(coef(m_vhb)[1]), linetype = "dashed", color = "red") +
+  labs(x = "", y = "", title = "(c)") +
+  scale_x_discrete(labels = c("red oak", "beech +\nred oak", "ped. oak +\nred oak", "all")) +
+  ylim(c(1.6, 6.2))
+
+
+gg_all <- grid.arrange(gg_syl, gg_rob, gg_rub, nrow = 3, bottom = "Tree species composition", left = "Community distance")
+
+ggsave("figures/mcoa_composition_feeding.png", gg_all, width = 4, height = 8)
+
+##### Part 5: Fourth corner analysis #######
+
+# explore trait-environment relation via a fourth corner analysis
+# load traits data
+ff <- list.files("data/", pattern = "_trait")
+traits_l <- lapply(ff, function(x) read.csv(paste0("data/", x)))
+names(traits_l) <- gsub("_traits.csv", "", ff)
+
+# some refinments, per taxa especiallymaking sure that species order is the
+# same between the trait table and the community matrix
+traits_l$bat$body_size <- with(traits_l$bat, (body_size_min + body_size_max) / 2)
+traits_l$bat$forest_affinity <- factor(traits_l$bat$forest_affinity)
+traits_l$bat <- traits_l$bat[,c(1, 5, 4)]
+traits_l$bird$forest_affinity <- factor(traits_l$bird$forest_affinity)
+traits_l$bird <- traits_l$bird[traits_l$bird$species %in%colnames(comm_l$bird),]
+traits_l$carabid <- traits_l$carabid[order(traits_l$carabid$species),]
+traits_l$carabid$dispersal <- factor(traits_l$carabid$dispersal)
+comm_l$carabid <- comm_l$carabid[,c(1, order(colnames(comm_l$carabid[,-1])) + 1)]
+comm_l$spider <- comm_l$spider[,c(1, order(colnames(comm_l$spider[,-1])) + 1)]
+traits_l$diplopod <- traits_l$diplopod[order(traits_l$diplopod$species),]
+traits_l$diplopod$forest_affinity <- factor(traits_l$diplopod$forest_affinity)
+comm_l$diplopod <- comm_l$diplopod[,c(1, order(colnames(comm_l$diplopod[,-1])) + 1)]
+traits_l$vegetation <- traits_l$vegetation[which(!is.na(traits_l$vegetation$height) & traits_l$vegetation$forest_affinity != ""),]
+for(i in 2:ncol(comm_l$vegetation)){
+  colnames(comm_l$vegetation)[i] <- as.character(tt_d$species_scientific[colnames(comm_l$vegetation)[i] == tt_d$n])
+}
+comm_l$vegetation <- comm_l$vegetation[,c(1, order(colnames(comm_l$vegetation[,-1])) + 1)]
+comm_l$vegetation <- comm_l$vegetation[,c(1, which(colnames(comm_l$vegetation) %in% traits_l$vegetation$species))]
+names(comm_l)[6] <- "isopod"
+
+## an helper function
+do_fourthcorner <- function(comm, ...){
+  spe <- comm_l[[comm]][,-1]
+  
+  trait <- traits_l[[comm]][,2:3]
+  
+  envs <- plot_info[,c("speccomb", "fragm_std")]
+  envs$speccomb <- factor(envs$speccomb)
+  
+  four <- fourthcorner(envs, spe, trait, ...)
+  
+  cat(paste0(comm, " is done!\n"))
+  
+  return(four)
+}
+
+
+fourth_l <- lapply(names(traits_l), function(comm) do_fourthcorner(comm,
+                                                                   modeltype = 6,
+                                                                   nrepet = 9999))
+png("figures/fourth_corner.png", width = 800, height = 800)
+par(mfrow = c(3, 3))
+for(i in 1:8){
+  plot(fourth_l[[i]])
+  mtext(names(traits_l)[i], line = 2, adj = 0)
+}
+dev.off()
+
+############ Part 6: compute sample coverage and diversity metrics
+
+# compute sample coverage
+library(iNEXT)
+
+get_coverage <- function(comm){
+  
+  cc <- comm_l[[comm]]
+  # remove plot id
+  cc <- cc[,-1]
+  # remove plots with no species
+  cc <- cc[rowSums(cc) > 0,]
+  # remove plots with only one species
+  cc <- cc[apply(cc, 1, function(x) sum(x > 0)) != 1,]
+  
+  # get iNext
+  ii <- iNEXT(t(cc), q = 0, datatype = "abundance", knots = 2)
+  
+  return(mean(ii$DataInfo$SC))
+  
+}
+
+lapply(comms[-c(2, 9)], function(x) get_coverage(x))
+
+
+# get plot of tightness vs diversity
+library(tidyr)
+get_div <- function(x){
+  
+  rich <- sum(x > 0, na.rm = TRUE)
+  p <- x / sum(x, na.rm = TRUE)
+  sha <- exp(- sum(p * log(p), na.rm = TRUE))
+  simp <- 1 / sum(p ** 2)
+  
+  out <- data.frame(rich = rich, sha = sha, simp = simp)
+  
+  return(out)
+}
+
+
+dd <- ldply(comm_l, function(x) {
+  out <- adply(x, 1, get_div, .expand = FALSE)
+})
+
+dd %>%
+  pivot_longer(3:5, names_to = "index") %>%
+  rename(id_plot = X1) %>%
+  left_join(vhb_dd[,1:2]) -> dd_d
+
+ggplot(dd_d, aes(x=d, y=value)) +
+  stat_smooth(method = "lm", se = FALSE) +
+  geom_point() +
+  facet_grid(.id ~ index) 
+
+dd_d %>%
+  group_by(.id, index) %>%
+  summarise(R = cor(value, d)) %>%
+  arrange(desc(R)) -> cc
+
 

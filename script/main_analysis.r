@@ -20,7 +20,7 @@ library(gridExtra)
 setwd("~/PostDoc_Ghent/Synthesis_3/treeweb_community/")
 
 # load plot data
-plot_info <- read.csv("data/synthesis_expldata_raw.csv", sep = " ", stringsAsFactors = FALSE)
+plot_info <- read.csv("data/synthesis_expldata_raw.csv", stringsAsFactors = FALSE)
 plot_xy <- read.csv("data/plot_xy.csv")
 
 # load community data
@@ -32,6 +32,8 @@ names(comm_l) <- comms
 comm_l$bird <- comm_l$bird[,-which(colSums(comm_l$bird) == 0)]
 # divide herbivore by sampling effort
 comm_l$herb <- cbind(comm_l$herb[,1], comm_l$herb[,-1] / plot_info$specrich)
+# remove genus level id in isopods
+comm_l$isopods <- comm_l$isopods[,-ncol(comm_l$isopods)]
 
 # define spatial neighbors based on distance and fragment ID
 xx <- dnearneigh(as.matrix(plot_xy[,c("X", "Y")]), d1 = 0, d2 = 450)
